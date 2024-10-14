@@ -27,9 +27,9 @@ import io.micrometer.core.instrument.util.TimeUtils;
 
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -37,18 +37,25 @@ import java.util.stream.StreamSupport;
 public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer {
 
     /**
-     * Preferring {@link ConcurrentLinkedDeque} over {@link CopyOnWriteArrayList} here
+     * Preferring {@link ConcurrentSkipListSet} over other concurrent collections
      * because...
      * <p>
      * Retrieval of percentile values will be O(N) but starting/stopping tasks will be
-     * O(1). Starting/stopping tasks happen in the same thread as the main application
-     * code, where publishing generally happens in a separate thread. Also, shipping
-     * client-side percentiles should be relatively uncommon.
+     * O(log(N)). Starting/stopping tasks happen in the same thread as the main
+     * application code, where publishing generally happens in a separate thread. Also,
+     * shipping client-side percentiles should be relatively uncommon.
+     * <p>
+     * Tasks are naturally ordered at time of insertion, but task completion/removal can
+     * happen out-of-order, that causes removal of tasks from the middle of the list. A
+     * queue would provide O(1) insertion, but O(N) removal in average. A skip-list
+     * provides O(log(N)) average across all tasks.
      * <p>
      * Histogram creation is O(N) for both the queue and list options, because we have to
      * consider which bucket each active task belongs.
      */
-    private final Deque<SampleImpl> activeTasks = new ConcurrentLinkedDeque<>();
+    private final NavigableSet<SampleImpl> activeTasks = new ConcurrentSkipListSet<>();
+
+    private final AtomicLong taskId = new AtomicLong();
 
     private final Clock clock;
 
@@ -91,7 +98,7 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
 
     @Override
     public Sample start() {
-        SampleImpl sample = new SampleImpl();
+        SampleImpl sample = new SampleImpl(taskId.incrementAndGet());
         activeTasks.add(sample);
         return sample;
     }
@@ -108,8 +115,13 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
 
     @Override
     public double max(TimeUnit unit) {
-        Sample oldest = activeTasks.peek();
-        return oldest == null ? 0.0 : oldest.duration(unit);
+        try {
+            Sample oldest = activeTasks.first();
+            return oldest.duration(unit);
+        }
+        catch (NoSuchElementException e) {
+            return 0.0;
+        }
     }
 
     @Override
@@ -215,13 +227,16 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
                 (ps, scaling) -> ps.print("Summary output for LongTaskTimer histograms is not supported."));
     }
 
-    class SampleImpl extends Sample {
+    class SampleImpl extends Sample implements Comparable<SampleImpl> {
 
         private final long startTime;
 
+        private final long id;
+
         private volatile boolean stopped;
 
-        private SampleImpl() {
+        private SampleImpl(long id) {
+            this.id = id;
             this.startTime = clock.monotonicTime();
         }
 
@@ -247,6 +262,15 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
             double durationInNanoseconds = duration(TimeUnit.NANOSECONDS);
             return "SampleImpl{" + "duration(seconds)=" + TimeUtils.nanosToUnit(durationInNanoseconds, TimeUnit.SECONDS)
                     + ", " + "duration(nanos)=" + durationInNanoseconds + ", " + "startTimeNanos=" + startTime + '}';
+        }
+
+        @Override
+        public int compareTo(DefaultLongTaskTimer.SampleImpl o) {
+            int startCompare = Long.compare(startTime, o.startTime);
+            if (startCompare == 0) {
+                return Long.compare(id, o.id);
+            }
+            return startCompare;
         }
 
     }
