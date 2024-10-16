@@ -29,7 +29,6 @@ import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -54,8 +53,6 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
      * consider which bucket each active task belongs.
      */
     private final NavigableSet<SampleImpl> activeTasks = new ConcurrentSkipListSet<>();
-
-    private final AtomicLong taskId = new AtomicLong();
 
     private final Clock clock;
 
@@ -98,7 +95,7 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
 
     @Override
     public Sample start() {
-        SampleImpl sample = new SampleImpl(taskId.incrementAndGet());
+        SampleImpl sample = new SampleImpl();
         activeTasks.add(sample);
         return sample;
     }
@@ -231,12 +228,9 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
 
         private final long startTime;
 
-        private final long id;
-
         private volatile boolean stopped;
 
-        private SampleImpl(long id) {
-            this.id = id;
+        private SampleImpl() {
             this.startTime = clock.monotonicTime();
         }
 
@@ -268,7 +262,7 @@ public class DefaultLongTaskTimer extends AbstractMeter implements LongTaskTimer
         public int compareTo(DefaultLongTaskTimer.SampleImpl o) {
             int startCompare = Long.compare(startTime, o.startTime);
             if (startCompare == 0) {
-                return Long.compare(id, o.id);
+                return Long.compare(hashCode(), o.hashCode());
             }
             return startCompare;
         }
